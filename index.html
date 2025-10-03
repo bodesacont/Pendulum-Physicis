@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Grid Pendulums with Permanent Trails and Force</title>
+  <title>Infinite Pendulums, Snap Grid, Trails, Pause & Tip Control</title>
   <style>
     body { margin: 0; background: #000; overflow: hidden; }
     canvas { display: block; background: #000; }
@@ -11,6 +11,27 @@
       padding: 10px 18px; border-radius: 10px; z-index:10; font-family: sans-serif;
       box-shadow: 0 2px 12px #000c;
       user-select: none;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    #pauseBtn {
+      background: #fff;
+      color: #222;
+      border: none;
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 1em;
+      font-weight: bold;
+      margin-left: 10px;
+      cursor: pointer;
+      box-shadow: 0 1px 4px #0006;
+      transition: background 0.1s;
+    }
+    #pauseBtn.paused {
+      background: #e43;
+      color: #fff;
     }
     #controls label { margin-right: 6px; }
     #controls input[type=range] { width: 80px; }
@@ -18,12 +39,14 @@
 </head>
 <body>
 <div id="controls">
-  <label>Gravity: <input id="gravity" type="range" min="0" max="2" step="0.01" value="0.4"></label>
-  <label>Speed: <input id="speed" type="range" min="0.1" max="2" step="0.01" value="1"></label>
-  <label>Pendulums: <input id="numPendulums" type="number" min="1" max="20" value="6" style="width:42px"></label>
-  <label>Segments: <input id="numSegments" type="number" min="1" max="15" value="5" style="width:42px"></label>
+  <label>Gravity: <input id="gravity" type="range" min="0" max="2" step="0.01" value="0.9"></label>
+  <label>Speed: <input id="speed" type="range" min="0.1" max="50" step="0.01" value="5"></label>
+  <label>Force: <input id="force" type="range" min="0.01" max="1.2" step="0.01" value="0.43"></label>
+  <label>Pendulums: <input id="numPendulums" type="number" min="1" value="50" style="width:52px"></label>
+  <label>Segments: <input id="numSegments" type="number" min="1" max="20" value="7" style="width:42px"></label>
   <button id="reset">Reset</button>
   <button id="clearTrails">Clear Trails</button>
+  <button id="pauseBtn">Pause</button>
 </div>
 <canvas id="pendulum-canvas"></canvas>
 <script>
@@ -36,49 +59,69 @@ canvas.width = w; canvas.height = h;
 // Controls
 const gravityRange = document.getElementById('gravity');
 const speedRange = document.getElementById('speed');
+const forceRange = document.getElementById('force');
 const pendulumsInput = document.getElementById('numPendulums');
 const segmentsInput = document.getElementById('numSegments');
 const resetBtn = document.getElementById('reset');
 const clearTrailsBtn = document.getElementById('clearTrails');
+const pauseBtn = document.getElementById('pauseBtn');
 
 // Parameters
 let GRAVITY = parseFloat(gravityRange.value);
 let SPEED = parseFloat(speedRange.value);
+let FORCE = parseFloat(forceRange.value);
 let NUM_PENDULUMS = parseInt(pendulumsInput.value,10);
 let SEGMENTS_PER_PENDULUM = parseInt(segmentsInput.value,10);
 const GLOW_BLUR = 16;
-const SEGMENT_LENGTH = () => Math.min(w, h) / (SEGMENTS_PER_PENDULUM * 2.5);
+const SEGMENT_LENGTH = () => Math.min(w, h) / (SEGMENTS_PER_PENDULUM * 2.6);
+const FRICTION = 0.96;
+
+let paused = false;
+
+// --- Snap grid logic (hidden) --- //
+let gridPoints = [];
+const GRID_COLS = 10;
+const GRID_ROWS = 8;
+function updateGrid() {
+  gridPoints = [];
+  let gridW = w * 0.65, gridH = h * 0.4;
+  let startX = w/2 - gridW/2, startY = h*0.14;
+  for(let row=0; row<GRID_ROWS; ++row) {
+    for(let col=0; col<GRID_COLS; ++col) {
+      let x = startX + (col/(GRID_COLS-1)) * gridW;
+      let y = startY + (row/(GRID_ROWS-1)) * gridH;
+      gridPoints.push({x, y});
+    }
+  }
+}
+updateGrid();
+
+function closestGridPoint(pt) {
+  let minD = 1e9, minP = gridPoints[0];
+  for(const gp of gridPoints) {
+    let d = dist(pt, gp);
+    if(d < minD) { minD = d; minP = gp; }
+  }
+  return minP;
+}
 
 // Mouse
-let mouse = { x: -1000, y: -1000, down: false, dragging: null, dragType: null, dragIndex: null, offsetX: 0, offsetY: 0 };
+let mouse = { 
+  x: -1000, y: -1000, 
+  down: false, 
+  dragging: null, dragType: null, dragIndex: null, 
+  offsetX: 0, offsetY: 0, 
+  lastX: -1000, lastY: -1000,
+  tipDrag: false, tipPendulum: null, tipIndex: null, tipLast: null
+};
 
 // Utility
 function dist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
 function clamp(val, min, max) { return Math.max(min, Math.min(val, max)); }
 function lerp(a,b,t){return a + (b-a)*t;}
 function randomColor() {
-  // Random saturated color
   let h = Math.floor(Math.random()*360);
   return `hsl(${h}, 80%, 55%)`;
-}
-
-// Grid placement logic
-function gridPositions(n, areaW, areaH, centerX, centerY) {
-  let cols = Math.ceil(Math.sqrt(n)),
-      rows = Math.ceil(n / cols),
-      positions = [],
-      cellW = areaW / cols,
-      cellH = areaH / rows,
-      startX = centerX - areaW/2 + cellW/2,
-      startY = centerY - areaH/2 + cellH/2;
-  for (let i=0; i<n; ++i) {
-    let row = Math.floor(i/cols), col = i % cols;
-    positions.push({
-      x: startX + col*cellW,
-      y: startY + row*cellH
-    });
-  }
-  return positions;
 }
 
 // Classes
@@ -86,23 +129,27 @@ class PendulumSegment {
   constructor(length, angle) {
     this.length = length;
     this.angle = angle;
-    this.aVel = 0;
+    this.aVel = (Math.random()-0.5)*0.8;
     this.aAcc = 0;
   }
 }
 class Pendulum {
   constructor(origin, numSegments, color) {
     this.origin = {...origin};
+    this.snapOrigin = closestGridPoint(this.origin);
     this.segments = [];
     for (let i=0;i<numSegments;++i)
       this.segments.push(new PendulumSegment(
         SEGMENT_LENGTH(),
-        lerp(Math.PI/3,2*Math.PI/3,Math.random())
+        lerp(-Math.PI,Math.PI,Math.random())
       ));
-    this.trail = []; // permanent trail
+    this.trail = [];
     this.color = color;
+    this.lastOrigin = {...this.origin};
+    this.tipDragged = false;
+    this.tipOverride = null; // {x, y}
+    this.tipPrev = null; // for velocity
   }
-  // Forward kinematics: returns array of points [origin, ..., tip]
   getPoints() {
     let pts = [this.origin];
     let x = this.origin.x, y = this.origin.y, angle = 0;
@@ -112,12 +159,26 @@ class Pendulum {
       y += seg.length * Math.cos(angle);
       pts.push({x, y});
     }
+    // If tip is being dragged, override tip position
+    if (this.tipDragged && this.tipOverride) {
+      pts[pts.length-1] = {x: this.tipOverride.x, y: this.tipOverride.y};
+      // Back-calculate all angles to make the segments point to the tip in a straight line
+      let dx = this.tipOverride.x - this.origin.x;
+      let dy = this.tipOverride.y - this.origin.y;
+      let totalLen = this.segments.reduce((a,s)=>a+s.length,0);
+      let straightAngle = Math.atan2(dx, dy);
+      for (let i=0; i<this.segments.length; ++i) {
+        this.segments[i].angle = straightAngle / this.segments.length;
+      }
+    }
     return pts;
   }
-  // Physics update: includes collision with mouse
-  update(gravity, speed) {
+  update(gravity, speed, forceParam) {
+    if (this.tipDragged) {
+      // While dragging tip, do not advance physics
+      return;
+    }
     let pts = this.getPoints();
-    // Mouse block logic (treat mouse as a circle)
     for (let i = 0; i < pts.length-1; ++i) {
       let nearest = nearestPointOnSegment(mouse, pts[i], pts[i+1]);
       if (dist(mouse, nearest) < 22) {
@@ -139,25 +200,33 @@ class Pendulum {
         }
       }
     }
-    // Standard physics
     for (let i=0;i<this.segments.length;++i) {
       let seg = this.segments[i], totalAngle = 0;
       for (let j=0;j<=i;++j) totalAngle += this.segments[j].angle;
       seg.aAcc = -gravity / seg.length * Math.sin(totalAngle);
-      seg.aVel += seg.aAcc * speed;
-      seg.aVel *= 0.995;
+      seg.aVel += seg.aAcc * speed + (Math.random()-0.5)*0.002;
+      seg.aVel *= (FRICTION + forceParam*0.022);
       seg.angle += seg.aVel * speed;
+      seg.angle += seg.aAcc * 0.5 * forceParam * speed;
     }
+    this.lastOrigin = {...this.origin};
   }
-  // Draw pendulum and trail
+  drawTrail(ctx) {
+    if (this.trail.length < 2) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(this.trail[0].x, this.trail[0].y);
+    for (let i=1; i<this.trail.length; ++i) {
+      ctx.lineTo(this.trail[i].x, this.trail[i].y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
   draw(ctx) {
     let pts = this.getPoints();
-
-    // Permanent Trail
-    this.updateTrail(pts[pts.length-1]);
-    this.drawTrail(ctx);
-
-    // Draw segments
     ctx.save();
     ctx.shadowBlur = GLOW_BLUR;
     ctx.shadowColor = this.color;
@@ -168,7 +237,6 @@ class Pendulum {
       ctx.moveTo(pts[i].x, pts[i].y);
       ctx.lineTo(pts[i+1].x, pts[i+1].y);
       ctx.stroke();
-      // Joint
       ctx.beginPath();
       ctx.arc(pts[i+1].x, pts[i+1].y, 11, 0, 2*Math.PI);
       ctx.fillStyle = this.color;
@@ -182,29 +250,31 @@ class Pendulum {
     ctx.shadowBlur = GLOW_BLUR*1.3;
     ctx.shadowColor = "#fff";
     ctx.fill();
+    // Draw tip joint with highlight if hovered
+    let tip = pts[pts.length-1];
+    ctx.beginPath();
+    ctx.arc(tip.x, tip.y, 15, 0, 2*Math.PI);
+    ctx.fillStyle = mouse.tipDrag && mouse.tipPendulum === this ? '#fff' : (dist(mouse, tip)<17 ? '#ff0' : '#fff8');
+    ctx.globalAlpha = 0.28;
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = "#fff";
+    ctx.fill();
+    ctx.globalAlpha = 1;
     ctx.restore();
+    this.updateTrail(pts[pts.length-1]);
   }
-  // Add tip to permanent trail only if moved significantly
   updateTrail(pt){
     if (this.trail.length === 0 || dist(pt, this.trail[this.trail.length-1]) > 2)
       this.trail.push({x: pt.x, y: pt.y});
   }
-  drawTrail(ctx) {
-    if (this.trail.length < 2) return;
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = 'rgba(255,255,255,0.93)';
-    ctx.beginPath();
-    ctx.moveTo(this.trail[0].x, this.trail[0].y);
-    for (let i=1; i<this.trail.length; ++i) {
-      ctx.lineTo(this.trail[i].x, this.trail[i].y);
-    }
-    ctx.stroke();
-    ctx.restore();
-  }
   clearTrail() {
     this.trail = [];
+  }
+  snapToGrid() {
+    let snap = closestGridPoint(this.origin);
+    this.origin.x = snap.x;
+    this.origin.y = snap.y;
+    this.snapOrigin = snap;
   }
 }
 
@@ -220,16 +290,18 @@ function nearestPointOnSegment(p, a, b) {
 // Pendulums array and reset
 let pendulums = [];
 function resetPendulums() {
+  updateGrid();
   pendulums = [];
-  let gridAreaW = w * 0.6, gridAreaH = h * 0.6;
-  let positions = gridPositions(NUM_PENDULUMS, gridAreaW, gridAreaH, w/2, h/2);
   for (let i=0; i<NUM_PENDULUMS; ++i) {
+    let idx = Math.floor(Math.random()*gridPoints.length);
+    let pos = {...gridPoints[idx]};
     let color = randomColor();
     pendulums.push(new Pendulum(
-      positions[i],
+      pos,
       SEGMENTS_PER_PENDULUM,
       color
     ));
+    pendulums[pendulums.length-1].snapToGrid();
   }
 }
 window.addEventListener('resize', ()=>{
@@ -238,27 +310,43 @@ window.addEventListener('resize', ()=>{
   resetPendulums();
 });
 
-// --- Mouse Interactivity for Drag/Force --- //
+// Mouse interactivity
 canvas.addEventListener('mousedown', e => {
   mouse.down = true;
-  // Try to drag origin first
+  mouse.lastX = mouse.x; mouse.lastY = mouse.y;
+  // Tip drag
+  for (let p of pendulums) {
+    let pts = p.getPoints();
+    let tip = pts[pts.length-1];
+    if (dist(mouse, tip) < 17) {
+      mouse.tipDrag = true;
+      mouse.tipPendulum = p;
+      mouse.tipIndex = pts.length-1;
+      p.tipDragged = true;
+      p.tipOverride = {x: tip.x, y: tip.y};
+      p.tipPrev = {x: tip.x, y: tip.y};
+      return;
+    }
+  }
+  // Origin drag
   for (let p of pendulums) {
     if (dist(mouse, p.origin) < 20) {
       mouse.dragging = p;
       mouse.dragType = 'origin';
       mouse.offsetX = p.origin.x - mouse.x;
       mouse.offsetY = p.origin.y - mouse.y;
+      p.lastOrigin = {...p.origin};
       return;
     }
   }
-  // Try to drag a segment for force
+  // Segment drag
   for (let p of pendulums) {
     let pts = p.getPoints();
-    for (let i = 1; i < pts.length; ++i) { // skip origin
+    for (let i = 1; i < pts.length-1; ++i) {
       if (dist(mouse, pts[i]) < 16) {
         mouse.dragging = p;
         mouse.dragType = 'segment';
-        mouse.dragIndex = i-1; // segment index
+        mouse.dragIndex = i-1;
         mouse.startPos = {x: pts[i].x, y: pts[i].y};
         mouse.lastPos = {x: mouse.x, y: mouse.y};
         return;
@@ -270,33 +358,69 @@ canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   mouse.x = e.clientX - rect.left;
   mouse.y = e.clientY - rect.top;
-  // If dragging, update
+  // Tip drag
+  if (mouse.tipDrag && mouse.tipPendulum) {
+    mouse.tipPendulum.tipOverride = {x: mouse.x, y: mouse.y};
+    mouse.tipPendulum.tipDragged = true;
+  }
+  // Origin drag
   if (mouse.down && mouse.dragging) {
     if (mouse.dragType === 'origin') {
+      let oldOrigin = {x: mouse.dragging.origin.x, y: mouse.dragging.origin.y};
       mouse.dragging.origin.x = mouse.x + mouse.offsetX;
       mouse.dragging.origin.y = mouse.y + mouse.offsetY;
+      mouse.dragging.snapToGrid();
+      let dx = mouse.dragging.origin.x - oldOrigin.x;
+      let dy = mouse.dragging.origin.y - oldOrigin.y;
+      if (dx !== 0 || dy !== 0) {
+        let impulse = Math.sqrt(dx*dx+dy*dy)*0.13*FORCE;
+        let sign = (dx*dy > 0) ? -1 : 1;
+        for (let seg of mouse.dragging.segments) {
+          let randomFactor = 0.7 + Math.random()*0.6;
+          seg.aVel -= sign * impulse * randomFactor;
+        }
+      }
+    }
+    if (mouse.dragType === 'segment') {
+      mouse.lastPos = {x: mouse.x, y: mouse.y};
     }
   }
 });
 canvas.addEventListener('mouseup', e => {
-  // If dragging a segment, apply force as impulse
+  if (mouse.tipDrag && mouse.tipPendulum) {
+    // On tip drag release: calculate "velocity" to impart to the last segment
+    let p = mouse.tipPendulum;
+    let prev = p.tipPrev || p.tipOverride;
+    let curr = p.tipOverride;
+    let dx = curr.x - prev.x;
+    let dy = curr.y - prev.y;
+    // Set the last segment angle to point straight from prev joint to tip
+    let pts = p.getPoints();
+    let beforeTip = pts[pts.length-2];
+    let angle = Math.atan2(curr.x - beforeTip.x, curr.y - beforeTip.y);
+    p.segments[p.segments.length-1].angle = angle;
+    // Impart velocity based on release drag
+    p.segments[p.segments.length-1].aVel = (dx+dy)*0.06;
+    // Clear drag state
+    p.tipDragged = false;
+    p.tipOverride = null;
+    p.tipPrev = null;
+    mouse.tipDrag = false;
+    mouse.tipPendulum = null;
+    mouse.tipIndex = null;
+  }
   if (mouse.down && mouse.dragging && mouse.dragType === 'segment') {
     let p = mouse.dragging;
-    let pts = p.getPoints();
     let idx = mouse.dragIndex;
-    // Calculate drag delta as velocity
-    let dx = mouse.x - mouse.lastPos.x;
-    let dy = mouse.y - mouse.lastPos.y;
-    let force = Math.sqrt(dx*dx+dy*dy)*0.04;
+    let dx = mouse.x - mouse.startPos.x;
+    let dy = mouse.y - mouse.startPos.y;
+    let force = Math.sqrt(dx*dx+dy*dy)*0.07*FORCE;
     if (force > 0) {
-      // Apply impulse to angle velocity
       let seg = p.segments[idx];
-      // Impulse direction: perpendicular to segment
       let segAngle = 0;
       for (let i=0;i<=idx;++i) segAngle += p.segments[i].angle;
-      // Calculate perpendicular impulse (cross product)
-      let impulse = ((dx * Math.cos(segAngle)) - (dy * Math.sin(segAngle))) * 0.10;
-      seg.aVel += impulse;
+      let impulse = ((dx * Math.cos(segAngle)) - (dy * Math.sin(segAngle))) * 0.13;
+      seg.aVel += impulse * FORCE;
     }
   }
   mouse.down = false;
@@ -307,13 +431,14 @@ canvas.addEventListener('mouseup', e => {
 });
 canvas.addEventListener('mouseleave', e => {
   mouse.x = -1000; mouse.y = -1000; mouse.down = false; mouse.dragging = null; mouse.dragType = null; mouse.dragIndex = null;
+  mouse.tipDrag = false; mouse.tipPendulum = null; mouse.tipIndex = null;
 });
 
-// Controls
 gravityRange.addEventListener('input', ()=>{ GRAVITY = parseFloat(gravityRange.value); });
 speedRange.addEventListener('input', ()=>{ SPEED = parseFloat(speedRange.value); });
+forceRange.addEventListener('input', ()=>{ FORCE = parseFloat(forceRange.value); });
 pendulumsInput.addEventListener('change', ()=>{
-  NUM_PENDULUMS = parseInt(pendulumsInput.value,10);
+  NUM_PENDULUMS = Math.max(1, parseInt(pendulumsInput.value,10));
   resetPendulums();
 });
 segmentsInput.addEventListener('change', ()=>{
@@ -324,17 +449,41 @@ resetBtn.addEventListener('click', resetPendulums);
 clearTrailsBtn.addEventListener('click', () => {
   for (let p of pendulums) p.clearTrail();
 });
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? "Resume" : "Pause";
+  pauseBtn.classList.toggle('paused', paused);
+});
 
 // Animation
 function animate() {
   ctx.clearRect(0,0,w,h);
+  // Draw all trails first (so trails are behind pendulums)
   for (let p of pendulums) {
-    if (!mouse.dragging || mouse.dragging !== p || mouse.dragType !== 'origin')
-      p.update(GRAVITY, SPEED);
+    p.drawTrail(ctx);
+  }
+  // Draw all pendulums in front of trails
+  for (let p of pendulums) {
+    if (!paused && (!mouse.dragging || mouse.dragging !== p || mouse.dragType !== 'origin') && 
+        (!p.tipDragged)) {
+      p.update(GRAVITY, SPEED, FORCE);
+    }
     p.draw(ctx);
+    // For tip drag, update p.tipPrev for velocity calculation
+    if (p.tipDragged && p.tipOverride) {
+      p.tipPrev = {...p.tipOverride};
+    }
   }
   requestAnimationFrame(animate);
 }
+
+// Mouse
+canvas.addEventListener('mousemove', e => {
+  // For tip drag, update tipPrev for velocity
+  if (mouse.tipDrag && mouse.tipPendulum && mouse.tipPendulum.tipOverride) {
+    mouse.tipPendulum.tipPrev = {...mouse.tipPendulum.tipOverride};
+  }
+});
 
 // Init
 resetPendulums();
@@ -342,4 +491,4 @@ animate();
 
 </script>
 </body>
-</html>\
+</html>
