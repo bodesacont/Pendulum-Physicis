@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Interactive Glowing Rainbow Multi-Pendulums</title>
+  <style>
+    body {
+      margin: 0;
+      background: #000;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+<canvas id="pendulum-canvas"></canvas>
+<script>
+const canvas = document.getElementById('pendulum-canvas');
+const ctx = canvas.getContext('2d');
+let width = window.innerWidth;
+let height = window.innerHeight;
+canvas.width = width;
+canvas.height = height;
+
+// Parameters
+const NUM_PENDULUMS = 7;           // Number of pendulums
+const SEGMENTS_PER_PENDULUM = 5;   // Number of segments per pendulum
+const SEGMENT_LENGTH = Math.min(width, height) / (SEGMENTS_PER_PENDULUM * 2.5);
+const G = 0.4;                     // Gravity
+const FRICTION = 0.999;            // Damping
+const GLOW_BLUR = 16;
+const TRAIL_LENGTH = 80;           // Number of trail points
+
+// For randomness
+function randBetween(a, b) {
+  return Math.random() * (b - a) + a;
+}
+
+// Rainbow color helper
+function getRainbowColor(t) {
+  // t in [0, 1]
+  const r = Math.floor(127 * Math.sin(2 * Math.PI * t) + 128);
+  const g = Math.floor(127 * Math.sin(2 * Math.PI * t + 2) + 128);
+  const b = Math.floor(127 * Math.sin(2 * Math.PI * t + 4) + 128);
+  return `rgb(${r},${g},${b})`;
+}
+
+// Mouse tracking
+let mouse = { x: -1000, y: -1000 };
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+});
+canvas.addEventListener('mouseleave', e => {
+  mouse.x = -1000; mouse.y = -1000;
+});
+
+// Pendulum and segment classes
+class PendulumSegment {
+  constructor(length, angle, color) {
+    this.length = length;
+    this.angle = angle;       // radians
+    this.aVel = 0;
+    this.aAcc = 0;
+    this.color = color;
+    this.frozen = false;
+  }
+}
+
+class Pendulum {
+  constructor(origin, numSegments, baseColorIdx) {
+    this.origin = origin;
+    this.segments = [];
+    let angle = randBetween(Math.PI/3, 2*Math.PI/3);
+    for (let i = 0; i < numSegments; ++i) {
+      let t = (baseColorIdx + i/numSegments) % 1;
+      this.segments.push(new PendulumSegment(
+        SEGMENT_LENGTH,
+        angle + randBetween(-0.3,0.3),
+        getRainbowColor(t)
+      ));
+    }
+    this.frozen = false;
+    this.trail = []; // Trail of last point positions
+  }
+  // Forward kinematics: compute positions of all joints
+  getPoints() {
+    let points = [this.origin];
+    let x = this.origin.x, y = this.origin.y;
+    let angle = 0;
+    for (let seg of this.segments) {
+      angle += seg.angle;
+      x += seg.length * Math.sin(angle);
+      y += seg.length * Math.cos(angle);
+      points.push({x, y});
+    }
+    return points;
+  }
+  // Physics update
+  update() {
+    if (this.frozen) return;
+    let angle = 0;
+    let points = [this.origin];
+    let x = this.origin.x, y = this.origin.y;
+    for (let seg of this.segments) {
+      angle += seg.angle;
+      x += seg.length * Math.sin(angle);
+      y += seg.length * Math.cos(angle);
+      points.push({x, y});
+    }
+    // Physics: update each segment (approximate)
+    angle = 0;
+    for (let i = 0; i < this.segments.length; ++i) {
+      let seg = this.segments[i];
+      if (!seg.frozen) {
+        // Torque due to gravity
+        let totalAngle = 0;
+        for (let j = 0; j <= i; ++j)
+          totalAngle += this.segments[j].angle;
+        seg.aAcc = -G / seg.length * Math.sin(totalAngle);
+        seg.aVel += seg.aAcc;
+        seg.aVel *= FRICTION;
+        seg.angle += seg.aVel;
+      }
+    }
+  }
+  // Check for cursor collision
+  checkCollision(mouse) {
+    let pts = this.getPoints();
+    for (let i = 0; i < pts.length-1; ++i) {
+      let d = distToSegment(mouse, pts[i], pts[i+1]);
+      if (d < 18) {
+        this.frozen = true;
+        for (let seg of this.segments) seg.frozen = true;
+        return true;
+      }
+    }
+    return false;
+  }
+  // Draw pendulum
+  draw(ctx) {
+    // Draw the trail first so it appears behind the pendulum
+    this.drawTrail(ctx);
+
+    let pts = this.getPoints();
+    ctx.save();
+    ctx.shadowBlur = GLOW_BLUR;
+    ctx.shadowColor = "#fff";
+    for (let i = 0; i < pts.length-1; ++i) {
+      ctx.strokeStyle = this.segments[i].color;
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(pts[i].x, pts[i].y);
+      ctx.lineTo(pts[i+1].x, pts[i+1].y);
+      ctx.stroke();
+      // Draw joint
+      ctx.beginPath();
+      ctx.arc(pts[i+1].x, pts[i+1].y, 11, 0, 2*Math.PI);
+      ctx.fillStyle = this.segments[i].color;
+      ctx.shadowColor = this.segments[i].color;
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Update the trail with the last point
+    this.updateTrail(pts[pts.length-1]);
+  }
+  // Trail update
+  updateTrail(pt) {
+    this.trail.push({x: pt.x, y: pt.y});
+    if (this.trail.length > TRAIL_LENGTH) this.trail.shift();
+  }
+  // Draw the white trail
+  drawTrail(ctx) {
+    if (this.trail.length < 2) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineWidth = 4;
+    for (let i = 1; i < this.trail.length; ++i) {
+      let alpha = i / this.trail.length;
+      ctx.strokeStyle = `rgba(255,255,255,${alpha*0.45})`;
+      ctx.beginPath();
+      ctx.moveTo(this.trail[i-1].x, this.trail[i-1].y);
+      ctx.lineTo(this.trail[i].x, this.trail[i].y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+// Helper: Distance from point p to segment ab
+function distToSegment(p, a, b) {
+  let dx = b.x-a.x, dy = b.y-a.y;
+  if (dx === 0 && dy === 0) return Math.hypot(p.x-a.x, p.y-a.y);
+  let t = ((p.x-a.x)*dx + (p.y-a.y)*dy) / (dx*dx + dy*dy);
+  t = Math.max(0, Math.min(1, t));
+  let px = a.x + t*dx, py = a.y + t*dy;
+  return Math.hypot(p.x-px, p.y-py);
+}
+
+// Create pendulums
+let pendulums = [];
+function resetPendulums() {
+  pendulums = [];
+  let margin = width / (NUM_PENDULUMS+1);
+  for (let i = 0; i < NUM_PENDULUMS; ++i) {
+    let baseColorIdx = i/NUM_PENDULUMS;
+    pendulums.push(
+      new Pendulum(
+        {x: margin*(i+1), y: height/12},
+        SEGMENTS_PER_PENDULUM,
+        baseColorIdx
+      )
+    );
+  }
+}
+
+// Animation loop
+function animate() {
+  ctx.clearRect(0,0,width,height);
+  for (let p of pendulums) {
+    if (!p.frozen) p.update();
+    p.checkCollision(mouse);
+    p.draw(ctx);
+  }
+  requestAnimationFrame(animate);
+}
+
+// Handle resize
+window.addEventListener('resize', ()=>{
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+  resetPendulums();
+});
+
+// Click to unfreeze all
+canvas.addEventListener('click', () => {
+  for (let p of pendulums) {
+    p.frozen = false;
+    for (let seg of p.segments) seg.frozen = false;
+    p.trail = [];
+  }
+});
+
+// Start!
+resetPendulums();
+animate();
+
+</script>
+</body>
+</html>index
