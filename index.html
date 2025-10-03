@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Advanced Interactive Rainbow Pendulums</title>
+  <title>Permanent Trailing Rainbow Pendulums</title>
   <style>
     body { margin: 0; background: #000; overflow: hidden; }
     canvas { display: block; background: #000; }
@@ -23,6 +23,7 @@
   <label>Pendulums: <input id="numPendulums" type="number" min="1" max="20" value="6" style="width:42px"></label>
   <label>Segments: <input id="numSegments" type="number" min="1" max="15" value="5" style="width:42px"></label>
   <button id="reset">Reset</button>
+  <button id="clearTrails">Clear Trails</button>
 </div>
 <canvas id="pendulum-canvas"></canvas>
 <script>
@@ -38,6 +39,7 @@ const speedRange = document.getElementById('speed');
 const pendulumsInput = document.getElementById('numPendulums');
 const segmentsInput = document.getElementById('numSegments');
 const resetBtn = document.getElementById('reset');
+const clearTrailsBtn = document.getElementById('clearTrails');
 
 // Parameters
 let GRAVITY = parseFloat(gravityRange.value);
@@ -45,7 +47,6 @@ let SPEED = parseFloat(speedRange.value);
 let NUM_PENDULUMS = parseInt(pendulumsInput.value,10);
 let SEGMENTS_PER_PENDULUM = parseInt(segmentsInput.value,10);
 const GLOW_BLUR = 16;
-const TRAIL_LENGTH = 80;
 const SEGMENT_LENGTH = () => Math.min(w, h) / (SEGMENTS_PER_PENDULUM * 2.5);
 
 // Mouse
@@ -103,6 +104,9 @@ segmentsInput.addEventListener('change', ()=>{
   resetPendulums();
 });
 resetBtn.addEventListener('click', resetPendulums);
+clearTrailsBtn.addEventListener('click', () => {
+  for (let p of pendulums) p.clearTrail();
+});
 
 // Utility
 function dist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
@@ -127,10 +131,11 @@ class Pendulum {
         SEGMENT_LENGTH(),
         lerp(Math.PI/3,2*Math.PI/3,Math.random())
       ));
-    this.trail = [];
+    this.trail = []; // permanent trail
     this.colorBase = colorBase; // 0-1
     this.colorSpeed = colorSpeed; // speed of hue rotation
     this.colorPhase = Math.random(); // offset for color cycling
+    this.lastTip = null;
   }
   // Forward kinematics: returns array of points [origin, ..., tip]
   getPoints() {
@@ -147,20 +152,16 @@ class Pendulum {
   // Physics update: includes collision with mouse
   update(gravity, speed) {
     let pts = this.getPoints();
-    let mouseBlock = false;
-    // Check collision with mouse (treat mouse as a circle)
+    // Mouse block logic
     for (let i = 0; i < pts.length-1; ++i) {
       let nearest = nearestPointOnSegment(mouse, pts[i], pts[i+1]);
       if (dist(mouse, nearest) < 22) {
-        // Mouse blocks this segment: provide a physical constraint by "pushing" segment tip away
-        // Move the tip of segment[i] to just outside the mouse
         let v = {x: pts[i+1].x - mouse.x, y: pts[i+1].y - mouse.y};
         let len = Math.hypot(v.x, v.y);
         if (len < 22) {
           v.x *= (22/len); v.y *= (22/len);
           pts[i+1].x = mouse.x + v.x;
           pts[i+1].y = mouse.y + v.y;
-          // Inverse kinematics: update all angles up to this one
           let prev = pts[i];
           let dx = pts[i+1].x - prev.x;
           let dy = pts[i+1].y - prev.y;
@@ -169,8 +170,7 @@ class Pendulum {
           for (let j=0;j<=i;++j) angleSum += this.segments[j].angle;
           let diff = newAngle - angleSum;
           this.segments[i].angle += diff;
-          this.segments[i].aVel *= 0.5; // dampen velocity
-          mouseBlock = true;
+          this.segments[i].aVel *= 0.5;
         }
       }
     }
@@ -178,11 +178,10 @@ class Pendulum {
     let angle = 0;
     for (let i=0;i<this.segments.length;++i) {
       let seg = this.segments[i];
-      // Torque from gravity
       let totalAngle = 0; for (let j=0;j<=i;++j) totalAngle += this.segments[j].angle;
       seg.aAcc = -gravity / seg.length * Math.sin(totalAngle);
       seg.aVel += seg.aAcc * speed;
-      seg.aVel *= 0.995; // friction
+      seg.aVel *= 0.995;
       seg.angle += seg.aVel * speed;
     }
   }
@@ -192,7 +191,7 @@ class Pendulum {
     let hue = (this.colorBase + this.colorSpeed * time/4000 + this.colorPhase)%1;
     let pts = this.getPoints();
 
-    // Trail
+    // Permanent Trail
     this.updateTrail(pts[pts.length-1]);
     this.drawTrail(ctx);
 
@@ -224,24 +223,27 @@ class Pendulum {
     ctx.fill();
     ctx.restore();
   }
+  // Add tip to permanent trail only if moved significantly
   updateTrail(pt){
-    this.trail.push({x: pt.x, y: pt.y});
-    if (this.trail.length > TRAIL_LENGTH) this.trail.shift();
+    if (this.trail.length === 0 || dist(pt, this.trail[this.trail.length-1]) > 2)
+      this.trail.push({x: pt.x, y: pt.y});
   }
   drawTrail(ctx) {
     if (this.trail.length < 2) return;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.93)';
+    ctx.beginPath();
+    ctx.moveTo(this.trail[0].x, this.trail[0].y);
     for (let i=1; i<this.trail.length; ++i) {
-      let alpha = i / this.trail.length;
-      ctx.strokeStyle = `rgba(255,255,255,${alpha*0.45})`;
-      ctx.beginPath();
-      ctx.moveTo(this.trail[i-1].x, this.trail[i-1].y);
       ctx.lineTo(this.trail[i].x, this.trail[i].y);
-      ctx.stroke();
     }
+    ctx.stroke();
     ctx.restore();
+  }
+  clearTrail() {
+    this.trail = [];
   }
 }
 
