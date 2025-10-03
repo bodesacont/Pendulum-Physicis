@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Permanent Trailing Rainbow Pendulums</title>
+  <title>Grid Pendulums with Permanent Trails and Force</title>
   <style>
     body { margin: 0; background: #000; overflow: hidden; }
     canvas { display: block; background: #000; }
@@ -50,68 +50,36 @@ const GLOW_BLUR = 16;
 const SEGMENT_LENGTH = () => Math.min(w, h) / (SEGMENTS_PER_PENDULUM * 2.5);
 
 // Mouse
-let mouse = { x: -1000, y: -1000, down: false, dragging: null, offsetX: 0, offsetY: 0 };
-
-// Rainbow helper (HSV to RGB)
-function hsv2rgb(h, s, v) {
-  let f = (n, k = (n + h/60)%6) => v - v*s*Math.max(Math.min(k,4-k,1),0);
-  return [f(5)*255, f(3)*255, f(1)*255];
-}
-function getRainbowColor(t) {
-  // t in [0,1]
-  let [r,g,b] = hsv2rgb(360*t, 1, 1);
-  return `rgb(${r|0},${g|0},${b|0})`;
-}
-
-// Mouse events
-canvas.addEventListener('mousemove', e=>{
-  const rect = canvas.getBoundingClientRect();
-  mouse.x = e.clientX - rect.left;
-  mouse.y = e.clientY - rect.top;
-  if (mouse.down && mouse.dragging) {
-    mouse.dragging.origin.x = mouse.x + mouse.offsetX;
-    mouse.dragging.origin.y = mouse.y + mouse.offsetY;
-  }
-});
-canvas.addEventListener('mousedown', e=>{
-  mouse.down = true;
-  for (let p of pendulums) {
-    if (dist(mouse, p.origin) < 20) {
-      mouse.dragging = p;
-      mouse.offsetX = p.origin.x - mouse.x;
-      mouse.offsetY = p.origin.y - mouse.y;
-      break;
-    }
-  }
-});
-canvas.addEventListener('mouseup', e=>{
-  mouse.down = false;
-  mouse.dragging = null;
-});
-canvas.addEventListener('mouseleave', e=>{
-  mouse.x = -1000; mouse.y = -1000; mouse.down = false; mouse.dragging = null;
-});
-
-// Controls interaction
-gravityRange.addEventListener('input', ()=>{ GRAVITY = parseFloat(gravityRange.value); });
-speedRange.addEventListener('input', ()=>{ SPEED = parseFloat(speedRange.value); });
-pendulumsInput.addEventListener('change', ()=>{
-  NUM_PENDULUMS = parseInt(pendulumsInput.value,10);
-  resetPendulums();
-});
-segmentsInput.addEventListener('change', ()=>{
-  SEGMENTS_PER_PENDULUM = parseInt(segmentsInput.value,10);
-  resetPendulums();
-});
-resetBtn.addEventListener('click', resetPendulums);
-clearTrailsBtn.addEventListener('click', () => {
-  for (let p of pendulums) p.clearTrail();
-});
+let mouse = { x: -1000, y: -1000, down: false, dragging: null, dragType: null, dragIndex: null, offsetX: 0, offsetY: 0 };
 
 // Utility
 function dist(a, b) { return Math.hypot(a.x-b.x, a.y-b.y); }
 function clamp(val, min, max) { return Math.max(min, Math.min(val, max)); }
 function lerp(a,b,t){return a + (b-a)*t;}
+function randomColor() {
+  // Random saturated color
+  let h = Math.floor(Math.random()*360);
+  return `hsl(${h}, 80%, 55%)`;
+}
+
+// Grid placement logic
+function gridPositions(n, areaW, areaH, centerX, centerY) {
+  let cols = Math.ceil(Math.sqrt(n)),
+      rows = Math.ceil(n / cols),
+      positions = [],
+      cellW = areaW / cols,
+      cellH = areaH / rows,
+      startX = centerX - areaW/2 + cellW/2,
+      startY = centerY - areaH/2 + cellH/2;
+  for (let i=0; i<n; ++i) {
+    let row = Math.floor(i/cols), col = i % cols;
+    positions.push({
+      x: startX + col*cellW,
+      y: startY + row*cellH
+    });
+  }
+  return positions;
+}
 
 // Classes
 class PendulumSegment {
@@ -123,7 +91,7 @@ class PendulumSegment {
   }
 }
 class Pendulum {
-  constructor(origin, numSegments, colorBase, colorSpeed) {
+  constructor(origin, numSegments, color) {
     this.origin = {...origin};
     this.segments = [];
     for (let i=0;i<numSegments;++i)
@@ -132,10 +100,7 @@ class Pendulum {
         lerp(Math.PI/3,2*Math.PI/3,Math.random())
       ));
     this.trail = []; // permanent trail
-    this.colorBase = colorBase; // 0-1
-    this.colorSpeed = colorSpeed; // speed of hue rotation
-    this.colorPhase = Math.random(); // offset for color cycling
-    this.lastTip = null;
+    this.color = color;
   }
   // Forward kinematics: returns array of points [origin, ..., tip]
   getPoints() {
@@ -152,7 +117,7 @@ class Pendulum {
   // Physics update: includes collision with mouse
   update(gravity, speed) {
     let pts = this.getPoints();
-    // Mouse block logic
+    // Mouse block logic (treat mouse as a circle)
     for (let i = 0; i < pts.length-1; ++i) {
       let nearest = nearestPointOnSegment(mouse, pts[i], pts[i+1]);
       if (dist(mouse, nearest) < 22) {
@@ -175,10 +140,9 @@ class Pendulum {
       }
     }
     // Standard physics
-    let angle = 0;
     for (let i=0;i<this.segments.length;++i) {
-      let seg = this.segments[i];
-      let totalAngle = 0; for (let j=0;j<=i;++j) totalAngle += this.segments[j].angle;
+      let seg = this.segments[i], totalAngle = 0;
+      for (let j=0;j<=i;++j) totalAngle += this.segments[j].angle;
       seg.aAcc = -gravity / seg.length * Math.sin(totalAngle);
       seg.aVel += seg.aAcc * speed;
       seg.aVel *= 0.995;
@@ -186,9 +150,7 @@ class Pendulum {
     }
   }
   // Draw pendulum and trail
-  draw(ctx, time) {
-    // Animate rainbow color
-    let hue = (this.colorBase + this.colorSpeed * time/4000 + this.colorPhase)%1;
+  draw(ctx) {
     let pts = this.getPoints();
 
     // Permanent Trail
@@ -198,11 +160,10 @@ class Pendulum {
     // Draw segments
     ctx.save();
     ctx.shadowBlur = GLOW_BLUR;
-    ctx.shadowColor = "#fff";
+    ctx.shadowColor = this.color;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 8;
     for (let i=0;i<pts.length-1;++i) {
-      let t = (hue + i/pts.length)%1;
-      ctx.strokeStyle = getRainbowColor(t);
-      ctx.lineWidth = 8;
       ctx.beginPath();
       ctx.moveTo(pts[i].x, pts[i].y);
       ctx.lineTo(pts[i+1].x, pts[i+1].y);
@@ -210,8 +171,8 @@ class Pendulum {
       // Joint
       ctx.beginPath();
       ctx.arc(pts[i+1].x, pts[i+1].y, 11, 0, 2*Math.PI);
-      ctx.fillStyle = getRainbowColor((t+0.12)%1);
-      ctx.shadowColor = getRainbowColor((t+0.12)%1);
+      ctx.fillStyle = this.color;
+      ctx.shadowColor = this.color;
       ctx.fill();
     }
     // Draw base vertex as a large white circle if hovered
@@ -260,14 +221,14 @@ function nearestPointOnSegment(p, a, b) {
 let pendulums = [];
 function resetPendulums() {
   pendulums = [];
-  let margin = w/(NUM_PENDULUMS+1);
+  let gridAreaW = w * 0.6, gridAreaH = h * 0.6;
+  let positions = gridPositions(NUM_PENDULUMS, gridAreaW, gridAreaH, w/2, h/2);
   for (let i=0; i<NUM_PENDULUMS; ++i) {
-    let colorBase = Math.random();
-    let colorSpeed = 0.25 + Math.random()*0.5;
+    let color = randomColor();
     pendulums.push(new Pendulum(
-      {x: margin*(i+1), y: h/8 + Math.random()*h/10},
+      positions[i],
       SEGMENTS_PER_PENDULUM,
-      colorBase, colorSpeed
+      color
     ));
   }
 }
@@ -277,13 +238,100 @@ window.addEventListener('resize', ()=>{
   resetPendulums();
 });
 
+// --- Mouse Interactivity for Drag/Force --- //
+canvas.addEventListener('mousedown', e => {
+  mouse.down = true;
+  // Try to drag origin first
+  for (let p of pendulums) {
+    if (dist(mouse, p.origin) < 20) {
+      mouse.dragging = p;
+      mouse.dragType = 'origin';
+      mouse.offsetX = p.origin.x - mouse.x;
+      mouse.offsetY = p.origin.y - mouse.y;
+      return;
+    }
+  }
+  // Try to drag a segment for force
+  for (let p of pendulums) {
+    let pts = p.getPoints();
+    for (let i = 1; i < pts.length; ++i) { // skip origin
+      if (dist(mouse, pts[i]) < 16) {
+        mouse.dragging = p;
+        mouse.dragType = 'segment';
+        mouse.dragIndex = i-1; // segment index
+        mouse.startPos = {x: pts[i].x, y: pts[i].y};
+        mouse.lastPos = {x: mouse.x, y: mouse.y};
+        return;
+      }
+    }
+  }
+});
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+  // If dragging, update
+  if (mouse.down && mouse.dragging) {
+    if (mouse.dragType === 'origin') {
+      mouse.dragging.origin.x = mouse.x + mouse.offsetX;
+      mouse.dragging.origin.y = mouse.y + mouse.offsetY;
+    }
+  }
+});
+canvas.addEventListener('mouseup', e => {
+  // If dragging a segment, apply force as impulse
+  if (mouse.down && mouse.dragging && mouse.dragType === 'segment') {
+    let p = mouse.dragging;
+    let pts = p.getPoints();
+    let idx = mouse.dragIndex;
+    // Calculate drag delta as velocity
+    let dx = mouse.x - mouse.lastPos.x;
+    let dy = mouse.y - mouse.lastPos.y;
+    let force = Math.sqrt(dx*dx+dy*dy)*0.04;
+    if (force > 0) {
+      // Apply impulse to angle velocity
+      let seg = p.segments[idx];
+      // Impulse direction: perpendicular to segment
+      let segAngle = 0;
+      for (let i=0;i<=idx;++i) segAngle += p.segments[i].angle;
+      // Calculate perpendicular impulse (cross product)
+      let impulse = ((dx * Math.cos(segAngle)) - (dy * Math.sin(segAngle))) * 0.10;
+      seg.aVel += impulse;
+    }
+  }
+  mouse.down = false;
+  mouse.dragging = null;
+  mouse.dragType = null;
+  mouse.dragIndex = null;
+  mouse.offsetX = 0; mouse.offsetY = 0;
+});
+canvas.addEventListener('mouseleave', e => {
+  mouse.x = -1000; mouse.y = -1000; mouse.down = false; mouse.dragging = null; mouse.dragType = null; mouse.dragIndex = null;
+});
+
+// Controls
+gravityRange.addEventListener('input', ()=>{ GRAVITY = parseFloat(gravityRange.value); });
+speedRange.addEventListener('input', ()=>{ SPEED = parseFloat(speedRange.value); });
+pendulumsInput.addEventListener('change', ()=>{
+  NUM_PENDULUMS = parseInt(pendulumsInput.value,10);
+  resetPendulums();
+});
+segmentsInput.addEventListener('change', ()=>{
+  SEGMENTS_PER_PENDULUM = parseInt(segmentsInput.value,10);
+  resetPendulums();
+});
+resetBtn.addEventListener('click', resetPendulums);
+clearTrailsBtn.addEventListener('click', () => {
+  for (let p of pendulums) p.clearTrail();
+});
+
 // Animation
-function animate(time) {
+function animate() {
   ctx.clearRect(0,0,w,h);
   for (let p of pendulums) {
-    if (!mouse.dragging || mouse.dragging !== p)
+    if (!mouse.dragging || mouse.dragging !== p || mouse.dragType !== 'origin')
       p.update(GRAVITY, SPEED);
-    p.draw(ctx, time||0);
+    p.draw(ctx);
   }
   requestAnimationFrame(animate);
 }
@@ -294,4 +342,4 @@ animate();
 
 </script>
 </body>
-</html>
+</html>\
